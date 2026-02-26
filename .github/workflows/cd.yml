@@ -8,10 +8,12 @@ on:
 
 jobs:
   deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
@@ -20,6 +22,20 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # ✅ Wait if previous deployment running
+      - name: Wait for active deployment
+        run: |
+          while aws deploy list-deployments \
+            --application-name dev-codedeploy \
+            --deployment-group-name dev-dg \
+            --include-only-statuses InProgress \
+            --query "deployments" \
+            --output text | grep -q .; do
+              echo "Waiting for active deployment..."
+              sleep 15
+          done
+
+      # ✅ Get latest task definition
       - name: Get task definition ARN
         id: taskdef
         run: |
@@ -29,7 +45,8 @@ jobs:
             --output text)
           echo "task_def=$TASK_DEF" >> $GITHUB_OUTPUT
 
-      - name: Create AppSpec revision
+      # ✅ Create revision for CodeDeploy
+      - name: Create revision
         run: |
           cat > revision.json <<EOF
           {
@@ -44,7 +61,6 @@ jobs:
           }
           EOF
 
+      # ✅ Trigger blue/green deployment
       - name: Deploy
-        run: |
-          aws deploy create-deployment \
-          --cli-input-json file://revision.json
+        run: aws deploy create-deployment --cli-input-json file://revision.json
