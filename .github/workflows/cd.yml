@@ -15,14 +15,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Configure AWS
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ Wait if previous deployment running
+      ########################################################
+      # Wait if previous deployment running
+      ########################################################
       - name: Wait for active deployment
         run: |
           while aws deploy list-deployments \
@@ -35,17 +37,33 @@ jobs:
               sleep 15
           done
 
-      # ✅ Get latest task definition
-      - name: Get task definition ARN
+      ########################################################
+      # Create new task definition with NEW image
+      ########################################################
+      - name: Register new task definition
         id: taskdef
         run: |
-          TASK_DEF=$(aws ecs describe-task-definition \
+          IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/strapi:${{ github.sha }}
+
+          aws ecs describe-task-definition \
             --task-definition dev-strapi \
+            --query taskDefinition > taskdef.json
+
+          jq --arg IMAGE "$IMAGE" '
+            .containerDefinitions[0].image=$IMAGE |
+            del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)
+          ' taskdef.json > new-taskdef.json
+
+          NEW_TASK_DEF=$(aws ecs register-task-definition \
+            --cli-input-json file://new-taskdef.json \
             --query "taskDefinition.taskDefinitionArn" \
             --output text)
-          echo "task_def=$TASK_DEF" >> $GITHUB_OUTPUT
 
-      # ✅ Create revision for CodeDeploy
+          echo "task_def=$NEW_TASK_DEF" >> $GITHUB_OUTPUT
+
+      ########################################################
+      # Create CodeDeploy revision
+      ########################################################
       - name: Create revision
         run: |
           cat > revision.json <<EOF
@@ -61,6 +79,51 @@ jobs:
           }
           EOF
 
-      # ✅ Trigger blue/green deployment
-      - name: Deploy
-        run: aws deploy create-deployment --cli-input-json file://revision.json
+      ########################################################
+      # Trigger deployment
+      ########################################################
+      - name: Start deployment
+        id: deploy
+        run: |
+          DEPLOY_ID=$(aws deploy create-deployment \
+            --cli-input-json file://revision.json \
+            --query deploymentId \
+            --output text)
+
+          echo "deployment_id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          echo "Started deployment: $DEPLOY_ID"
+
+      ########################################################
+      # Monitor health & auto rollback
+      ########################################################
+      - name: Monitor deployment & rollback if failed
+        run: |
+          DEPLOY_ID=${{ steps.deploy.outputs.deployment_id }}
+
+          echo "Monitoring deployment $DEPLOY_ID"
+
+          while true; do
+            STATUS=$(aws deploy get-deployment \
+              --deployment-id $DEPLOY_ID \
+              --query "deploymentInfo.status" \
+              --output text)
+
+            echo "Status: $STATUS"
+
+            if [ "$STATUS" == "Succeeded" ]; then
+              echo "Deployment successful ✅"
+              exit 0
+            fi
+
+            if [ "$STATUS" == "Failed" ] || [ "$STATUS" == "Stopped" ]; then
+              echo "Deployment failed ❌ → rolling back"
+
+              aws deploy stop-deployment \
+                --deployment-id $DEPLOY_ID \
+                --auto-rollback-enabled
+
+              exit 1
+            fi
+
+            sleep 20
+          done

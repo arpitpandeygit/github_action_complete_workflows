@@ -33,6 +33,16 @@ module "ecs" {
   execution_role = module.iam.ecs_exec_role_arn
 }
 
+module "rds" {
+  source  = "../../modules/rds"
+  env     = "dev"
+  vpc_id  = module.network.vpc_id
+  subnets = module.network.subnets
+  ecs_sg  = module.security.ecs_sg
+
+  db_password = "StrapiPass123"
+}
+
 module "codedeploy" {
   source = "../../modules/codedeploy"
   env    = "dev"
@@ -51,3 +61,6 @@ output "alb_dns" {
   value = module.alb.alb_dns
 }
 
+output "db_endpoint" {
+  value = module.rds.db_endpoint
+}
